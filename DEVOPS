@@ -1,0 +1,68 @@
+pipeline {
+    /*每次需要修改该文件时，注意修改Prepare段SVN代码地址；对应不用项目的包括SVN账号密码（这里使用jenkins秘钥管理ID）*/
+    /*修改maven 编译的参数，这里使用shell命令行编译*/
+    /*指定Dockerfile的来源，默认在项目与POM文件同级目录下*/
+    /*构建生成的镜像上传仓库账户密码，使用jenkins秘钥管理ID*/
+    agent none
+    environment {
+        /*环境变量脚本使用的环境：sit，uat，pro*/ 
+        DEV = 'sit'
+    }
+    stages {
+        
+        /*准备阶段，清空当前存储代码的目录 --> 代码检出*/
+        stage('Prepare') {
+            agent { label 'master' }
+            steps {
+                checkout([$class: 'SubversionSCM', additionalCredentials: [], excludedCommitMessages: '', excludedRegions: '',
+                excludedRevprop: '', excludedUsers: '', filterChangelog: false, ignoreDirPropChanges: false, includedRegions: '', 
+                locations: [[credentialsId: '1d25c4f3-3e9c-4491-954b-0c5697c8bd0d', depthOption: 'infinity', ignoreExternalsOption: true, 
+                local: '.', remote: 'svn://127.0.0.1/web-commodity@HEAD']], 
+                workspaceUpdater: [$class: 'UpdateUpdater']])
+            }
+        }
+        
+        /*代码编译，注意编译的参数不同*/
+        stage('maven test and build') {
+            agent { label 'master' }
+            steps {
+                // sh 'ls'
+                dir('./') {
+                    sh '/opt/install/apache-maven-3.3.9/bin/mvn -v'
+                    sh '/opt/install/apache-maven-3.3.9/bin/mvn clean package -Dmaven.test.skip=true -Psit -U'
+                }
+            }
+        }
+        
+        /*构建镜像*/
+        stage('images build') {
+            agent { label 'master' }
+            steps {
+                dir('./') {
+                    // sh 'cp target/*.war .'
+                    // sh 'ls -l'
+                    // sh 'pwd'
+                    withCredentials([[$class: 'UsernamePasswordMultiBinding', credentialsId: 'docker-registry',usernameVariable: 'USERNAME', passwordVariable: 'PASSWORD']]) {
+                        sh 'sudo docker login -u ${USERNAME} -p ${PASSWORD} https://docker.example.cn'
+                        sh 'sudo docker build -t docker.example.cn/${DEV}/${JOB_NAME}:${BUILD_NUMBER} .'
+                        sh 'sudo docker push docker.example.cn/${DEV}/${JOB_NAME}:${BUILD_NUMBER}'
+                        sh 'sudo docker rmi docker.example.cn/${DEV}/${JOB_NAME}:${BUILD_NUMBER}'
+                        // sh 'rm -f *.war'
+                    }
+                }
+            }
+        }
+        
+        /*在jenkins节点k8s-master上运行部署任务*/        
+        stage('k8s-master') {
+            agent { label 'slave-k8s-master-001-sit' }
+            steps {
+                sh 'sudo -s && cd'
+                sh 'source /etc/profile'
+                // sh 'kubectl rolling-update ${JOB_NAME} --image=docker.example.cn/sit/${JOB_NAME}:${BUILD_NUMBER} --namespace=pro '
+                sh 'kubectl set image deployment/${JOB_NAME} ${JOB_NAME}=docker.example.cn/${DEV}/${JOB_NAME}:${BUILD_NUMBER} --namespace=pro'
+                // sh 'docker rmi $(docker images|grep "${DEV}/${JOB_NAME}" |awk \'{print $1":"$2-1}\')'
+            }
+        }
+    }
+}
